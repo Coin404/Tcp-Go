@@ -25,9 +25,9 @@ func main() {
 
 	// 构造一个 ChatMessage 消息
 	chatMsg := &message.ChatMessage{
-		ClientId:   "Client2",
+		ClientId:   "Client1",
 		ReceiverId: "Server",
-		Content:    "Hello, Server!",
+		Content:    "Hello, Server! I Clinet1 !!!",
 	}
 
 	// 序列化消息
@@ -42,7 +42,7 @@ func main() {
 			Marker:        0xEF,
 			Version:       1,
 			MessageFlags:  0x01,
-			TransactionID: 12345,
+			TransactionID: 00001,
 			MessageSize:   uint32(len(body)),
 		},
 		Body: body,
@@ -124,7 +124,7 @@ func sendHeartbeat(conn net.Conn) {
 		case <-ticker.C:
 			// 构造心跳消息
 			heartbeat := &message.Heartbeat{
-				ClientId:  "Client2",
+				ClientId:  "Client1",
 				Timestamp: time.Now().UnixNano() / int64(time.Millisecond),
 			}
 
@@ -141,7 +141,7 @@ func sendHeartbeat(conn net.Conn) {
 					Marker:        0xEF,
 					Version:       1,
 					MessageFlags:  0x02,  // 使用不同的消息标志来区分心跳消息
-					TransactionID: 12346, // 使用不同的事务ID
+					TransactionID: 00002, // 使用不同的事务ID
 					MessageSize:   uint32(len(body)),
 				},
 				Body: body,
