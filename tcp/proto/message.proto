@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package message;
+// protoc --go_out=. message.proto
+option go_package = "/";
+
+// 转发消息
+message ChatMessage {
+  string client_id = 1;
+  string receiver_id = 2;
+  string commond = 4;
+  string content = 5;
+}
+
+// 心跳消息
+message Heartbeat {
+  string client_id = 1;
+  int64 timestamp = 2;
+}
+
+// 权限消息
+message Auth {
+  string client_id = 1;
+  string token = 2;
+}
