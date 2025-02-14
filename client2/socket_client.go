@@ -23,20 +23,31 @@ func main() {
 
 	fmt.Println("Connected to server. Start sending messages!")
 
-	// 构造一个 ChatMessage 消息
-	chatMsg := &message.ChatMessage{
-		ClientId:   "Client2",
-		ReceiverId: "Server",
-		Content:    "Hello, Server! I Clinet2 !!!",
+	// 发送初始消息
+	if err := sendMessage(conn, "Client2", "Server", "Hello, Server! I am Client2!!!"); err != nil {
+		log.Fatalf("Failed to send initial message: %v", err)
 	}
 
-	// 序列化消息
+	// 启动心跳消息发送协程
+	go sendHeartbeat(conn, "Client2")
+
+	// 持续接收服务器响应
+	receiveResponses(conn)
+}
+
+// sendMessage 构造并发送一个 ChatMessage 消息
+func sendMessage(conn net.Conn, clientID, receiverID, content string) error {
+	chatMsg := &message.ChatMessage{
+		ClientId:   clientID,
+		ReceiverId: receiverID,
+		Content:    content,
+	}
+
 	body, err := proto.Marshal(chatMsg)
 	if err != nil {
-		log.Fatalf("Failed to marshal message: %v", err)
+		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	// 创建帧
 	frameRequest := &frame.Frame{
 		Header: frame.FrameHeader{
 			Marker:        0xEF,
@@ -48,21 +59,64 @@ func main() {
 		Body: body,
 	}
 
-	// 验证帧
-	if err := validateFrame(frameRequest); err != nil {
-		log.Fatalf("Failed to validate frame: %v", err)
+	// if err := validateFrame(frameRequest); err != nil {
+	// 	return fmt.Errorf("failed to validate frame: %w", err)
+	// }
+
+	return frame.WriteFrame(conn, frameRequest)
+}
+
+// sendHeartbeat 定时发送心跳消息
+func sendHeartbeat(conn net.Conn, clientID string) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := sendHeartbeatMessage(conn, clientID); err != nil {
+				log.Printf("Failed to send heartbeat message: %v", err)
+				continue
+			}
+			fmt.Println("Heartbeat message sent!")
+		default:
+			time.Sleep(time.Second) // 避免空转
+		}
+	}
+}
+
+// sendHeartbeatMessage 构造并发送一个心跳消息
+func sendHeartbeatMessage(conn net.Conn, clientID string) error {
+	heartbeat := &message.Heartbeat{
+		ClientId:  clientID,
+		Timestamp: time.Now().UnixNano() / int64(time.Millisecond),
 	}
 
-	// 发送帧
-	err = frame.WriteFrame(conn, frameRequest)
+	body, err := proto.Marshal(heartbeat)
 	if err != nil {
-		log.Fatalf("Failed to write frame: %v", err)
+		return fmt.Errorf("failed to marshal heartbeat message: %w", err)
 	}
 
-	// 启动心跳消息发送协程
-	go sendHeartbeat(conn)
+	frameRequest := &frame.Frame{
+		Header: frame.FrameHeader{
+			Marker:        0xEF,
+			Version:       1,
+			MessageFlags:  0x02,
+			TransactionID: 00002,
+			MessageSize:   uint32(len(body)),
+		},
+		Body: body,
+	}
 
-	// 持续接收服务器响应
+	// if err := validateFrame(frameRequest); err != nil {
+	// 	return fmt.Errorf("failed to validate frame: %w", err)
+	// }
+
+	return frame.WriteFrame(conn, frameRequest)
+}
+
+// receiveResponses 持续接收服务器响应
+func receiveResponses(conn net.Conn) {
 	for {
 		responseFrame, err := frame.ReadFrame(conn)
 		if err != nil {
@@ -74,83 +128,30 @@ func main() {
 			continue
 		}
 
-		// 解析响应消息
 		var responseMsg message.ChatMessage
 		if err := proto.Unmarshal(responseFrame.Body, &responseMsg); err != nil {
 			log.Printf("Failed to unmarshal response message: %v", err)
 			continue
 		}
 
-		// 打印响应消息
 		fmt.Printf("Received response: %+v\n", &responseMsg)
 	}
 }
 
 // validateFrame 验证 Frame 的头部和消息体是否符合预期
-func validateFrame(frame *frame.Frame) error {
-	// 验证头部
-	if frame.Header.Marker != 0xEF {
-		return fmt.Errorf("invalid marker: expected 0xEF, got %x", frame.Header.Marker)
-	}
-	if frame.Header.Version != 1 {
-		return fmt.Errorf("invalid version: expected 1, got %d", frame.Header.Version)
-	}
-	if frame.Header.MessageFlags != 0x01 {
-		return fmt.Errorf("invalid message flags: expected 0x01, got %x", frame.Header.MessageFlags)
-	}
-	if frame.Header.MessageSize != uint32(len(frame.Body)) {
-		return fmt.Errorf("invalid message size: expected %d, got %d", len(frame.Body), frame.Header.MessageSize)
-	}
+// func validateFrame(frame *frame.Frame) error {
+// 	if frame.Header.Marker != 0xEF {
+// 		return fmt.Errorf("invalid marker: expected 0xEF, got %x", frame.Header.Marker)
+// 	}
+// 	if frame.Header.Version != 1 {
+// 		return fmt.Errorf("invalid version: expected 1, got %d", frame.Header.Version)
+// 	}
+// 	if frame.Header.MessageFlags != 0x01 && frame.Header.MessageFlags != 0x02 {
+// 		return fmt.Errorf("invalid message flags: expected 0x01 or 0x02, got %x", frame.Header.MessageFlags)
+// 	}
+// 	if frame.Header.MessageSize != uint32(len(frame.Body)) {
+// 		return fmt.Errorf("invalid message size: expected %d, got %d", len(frame.Body), frame.Header.MessageSize)
+// 	}
 
-	// 验证 Protobuf 消息
-	chatMsg := &message.ChatMessage{}
-	if err := proto.Unmarshal(frame.Body, chatMsg); err != nil {
-		return fmt.Errorf("failed to unmarshal message: %v", err)
-	}
-
-	return nil
-}
-
-// sendHeartbeat 定时发送心跳消息
-func sendHeartbeat(conn net.Conn) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			// 构造心跳消息
-			heartbeat := &message.Heartbeat{
-				ClientId:  "Client2",
-				Timestamp: time.Now().UnixNano() / int64(time.Millisecond),
-			}
-
-			// 序列化心跳消息
-			body, err := proto.Marshal(heartbeat)
-			if err != nil {
-				log.Printf("Failed to marshal heartbeat message: %v", err)
-				continue
-			}
-
-			// 创建帧
-			frameRequest := &frame.Frame{
-				Header: frame.FrameHeader{
-					Marker:        0xEF,
-					Version:       1,
-					MessageFlags:  0x02,  // 使用不同的消息标志来区分心跳消息
-					TransactionID: 00002, // 使用不同的事务ID
-					MessageSize:   uint32(len(body)),
-				},
-				Body: body,
-			}
-
-			// 发送帧
-			if err := frame.WriteFrame(conn, frameRequest); err != nil {
-				log.Printf("Failed to write heartbeat frame: %v", err)
-				continue
-			}
-
-			fmt.Println("Heartbeat message sent!")
-		}
-	}
-}
+// 	return nil
+// }
