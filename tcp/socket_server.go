@@ -39,7 +39,6 @@ func main() {
 
 	startWorkerPool()
 
-	// 主循环，不断接受客户端连接，处理
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -76,21 +75,10 @@ func handleClient(conn net.Conn) {
 			} else {
 				fmt.Printf("Failed to read frame: %v\n", err)
 			}
-			mu.Lock()
-			// 删除连接队列
-			delete(clients, remoteAddr)
-			// 同时删除逻辑地址
-			for name, addr := range clientNameToAddr {
-				if addr == remoteAddr {
-					delete(clientNameToAddr, name)
-					break
-				}
-			}
-			mu.Unlock()
+			logoutClient(remoteAddr)
 			return
 		}
 
-		// TODO 后续第一次连接的时候需要补充逻辑名称ID，标记客户端A，客户端B，用以AB之间交互
 		// 如果是第一次连接，尝试获取客户端的逻辑名称ID
 		clientName := determineClientId(frame.Body)
 		if clientName != "" {
@@ -115,11 +103,26 @@ func handleClient(conn net.Conn) {
 
 // 解析首次连接
 func determineClientId(data []byte) string {
-	var msg message.Auth
-	if err := proto.Unmarshal(data, &msg); err == nil {
-		return msg.ClientId
+	// 解析通用 Message 结构
+	var msg message.Message
+	if err := proto.Unmarshal(data, &msg); err != nil {
+		fmt.Printf("Failed to unmarshal Message: %v\n", err)
 	}
-	return ""
+	if message.MessageType_CHAT_MESSAGE == msg.Type {
+		// 提取 ChatMessage
+		if msg.Payload == nil {
+			fmt.Println("ChatMessage payload is nil")
+			return ""
+		}
+		chatMsg, ok := msg.Payload.(*message.Message_ChatMessage)
+		if !ok {
+			fmt.Println("Failed to cast payload to ChatMessage")
+			return ""
+		}
+		return chatMsg.ChatMessage.ClientId
+	} else {
+		return ""
+	}
 }
 
 var singleCoreLimit = 100
@@ -138,63 +141,57 @@ func startWorkerPool() {
 // 消息处理器
 func worker() {
 	for frame := range jobChan {
-		// 解析 Protobuf 消息
-		messageType := determineMessageType(frame.Header)
-		switch messageType {
-		case "ChatMessage":
-			var msg message.ChatMessage
-			if err := proto.Unmarshal(frame.Body, &msg); err != nil {
-				fmt.Println("Failed to unmarshal ChatMessage:", err)
-				continue
-			}
-			fmt.Printf("Received ChatMessage: %+v\n", &msg)
-			handleChatMessage(&msg)
+		// 解析通用 Message 结构
+		var msg message.Message
+		if err := proto.Unmarshal(frame.Body, &msg); err != nil {
+			fmt.Printf("Failed to unmarshal Message: %v\n", err)
+		}
 
-		case "Heartbeat":
-			var msg message.Heartbeat
-			if err := proto.Unmarshal(frame.Body, &msg); err != nil {
-				fmt.Println("Failed to unmarshal Heartbeat:", err)
-				continue
+		fmt.Println("Received messageType:", msg.Type)
+		switch msg.Type {
+		case message.MessageType_CHAT_MESSAGE:
+			// 提取 ChatMessage
+			if msg.Payload == nil {
+				fmt.Println("ChatMessage payload is nil")
+				return
 			}
-			fmt.Printf("Received Heartbeat: %+v\n", &msg)
-			handleHeartbeat(&msg)
-
-		case "Auth":
-			var msg message.Auth
-			if err := proto.Unmarshal(frame.Body, &msg); err != nil {
-				fmt.Println("Failed to unmarshal Auth:", err)
-				continue
+			chatMsg, ok := msg.Payload.(*message.Message_ChatMessage)
+			if !ok {
+				fmt.Println("Failed to cast payload to ChatMessage")
+				return
 			}
-			fmt.Printf("Received Auth: %+v\n", &msg)
-			handleAuth(&msg)
+			fmt.Printf("Received ChatMessage: %+v\n", chatMsg.ChatMessage)
+			handleChatMessage(chatMsg.ChatMessage)
 
+		case message.MessageType_HEARTBEAT:
+			// 提取 Heartbeat
+			if msg.Payload == nil {
+				fmt.Println("Heartbeat payload is nil")
+				return
+			}
+			heartbeat, ok := msg.Payload.(*message.Message_Heartbeat)
+			if !ok {
+				fmt.Println("Failed to cast payload to Heartbeat")
+				return
+			}
+			fmt.Printf("Received Heartbeat: %+v\n", heartbeat.Heartbeat)
+			handleHeartbeat(heartbeat.Heartbeat)
 		default:
 			fmt.Println("Unknown message type")
 		}
 	}
 }
 
-// 判断是哪一种消息格式
-func determineMessageType(header frame.FrameHeader) string {
-	switch header.MessageFlags {
-	case 0x01:
-		return "ChatMessage"
-	case 0x02:
-		return "Heartbeat"
-	case 0x03:
-		return "Auth"
-	default:
-		return "Unknown"
-	}
-}
-
-// 单独的消息处理器
 func handleChatMessage(msg *message.ChatMessage) {
-	// 处理 ChatMessage 逻辑
-	response := &message.ChatMessage{
-		ClientId:   "Server",
-		ReceiverId: msg.ClientId,
-		Content:    "服务器收到消息！！Over",
+	response := &message.Message{
+		Type: message.MessageType_CHAT_MESSAGE,
+		Payload: &message.Message_ChatMessage{
+			ChatMessage: &message.ChatMessage{
+				ClientId:   "Server",
+				ReceiverId: msg.ClientId,
+				Content:    "服务器收到消息！！Over",
+			},
+		},
 	}
 	sendResponse(msg.ClientId, response)
 }
@@ -202,25 +199,18 @@ func handleChatMessage(msg *message.ChatMessage) {
 func handleHeartbeat(msg *message.Heartbeat) {
 	updateClientLastActive(msg.ClientId)
 
-	// 发送回复消息
-	response := &message.Heartbeat{
-		ClientId:  msg.ClientId,
-		Timestamp: time.Now().Unix(),
+	response := &message.Message{
+		Type: message.MessageType_HEARTBEAT,
+		Payload: &message.Message_Heartbeat{
+			Heartbeat: &message.Heartbeat{
+				ClientId:  msg.ClientId,
+				Timestamp: time.Now().Unix(),
+			},
+		},
 	}
 	sendResponse(msg.ClientId, response)
 }
 
-func handleAuth(msg *message.Auth) {
-	// 处理 Auth 逻辑
-	// 示例：发送一个响应消息
-	response := &message.Auth{
-		ClientId: msg.ClientId,
-		Token:    "Authenticated",
-	}
-	sendResponse(msg.ClientId, response)
-}
-
-// 回包
 func sendResponse(clientId string, response proto.Message) {
 	// 序列化响应消息
 	body, err := proto.Marshal(response)
@@ -266,10 +256,25 @@ func updateClientLastActive(clientId string) {
 	}
 }
 
-// 主动发起连接
 func getClientConn(clientId string) net.Conn {
 	mu.Lock()
 	defer mu.Unlock()
 	remoteAddr := clientNameToAddr[clientId]
-	return *clients[remoteAddr].Conn
+	if client, ok := clients[remoteAddr]; ok {
+		return *client.Conn
+	}
+	return nil
+}
+
+// 清除客户端信息
+func logoutClient(remoteAddr string) {
+	mu.Lock()
+	delete(clients, remoteAddr)
+	for name, addr := range clientNameToAddr {
+		if addr == remoteAddr {
+			delete(clientNameToAddr, name)
+			break
+		}
+	}
+	mu.Unlock()
 }
