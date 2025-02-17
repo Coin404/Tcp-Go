@@ -39,6 +39,9 @@ func main() {
 
 	startWorkerPool()
 
+	// 启动定时清理器，每分钟清理一次无效连接
+	go startCleanupTimer(1 * time.Minute)
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -297,5 +300,44 @@ func updateClientLastActive(clientId string) {
 	clients[remoteAddr] = &Client{
 		Conn:       clients[remoteAddr].Conn,
 		LastActive: time.Now(),
+	}
+}
+
+// 清理连接定时器
+func startCleanupTimer(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			cleanupInvalidConnections()
+		default:
+			time.Sleep(time.Second)
+		}
+	}
+}
+
+// 定时清理
+func cleanupInvalidConnections() {
+	mu.Lock()
+	defer mu.Unlock()
+
+	for remoteAddr, client := range clients {
+		// 检查 remoteAddr 是否在 clientNameToAddr 中
+		isValid := false
+		for _, addr := range clientNameToAddr {
+			if addr == remoteAddr {
+				isValid = true
+				break
+			}
+		}
+
+		// 如果 remoteAddr 不在 clientNameToAddr 中，关闭连接并移除
+		if !isValid {
+			fmt.Printf("Invalid connection detected: %s. Closing...\n", remoteAddr)
+			(*client.Conn).Close()
+			delete(clients, remoteAddr)
+		}
 	}
 }

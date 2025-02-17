@@ -23,12 +23,12 @@ func main() {
 	fmt.Println("Connected to server. Start sending messages!")
 
 	// 发送初始消息
-	if err := sendMessage(conn, "Client2", "Server", "Hello, Server! I am Client2!!!"); err != nil {
+	if err := sendMessage(conn, "", "Server", "Hello, Server! I am Client1!!!"); err != nil {
 		log.Fatalf("Failed to send initial message: %v", err)
 	}
 
 	// 启动心跳消息发送协程
-	go sendHeartbeat(conn, "Client2")
+	go sendHeartbeat(conn, "Client1")
 
 	// 持续接收服务器响应
 	receiveResponses(conn)
