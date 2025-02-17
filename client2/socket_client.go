@@ -14,7 +14,6 @@ import (
 )
 
 func main() {
-	// 连接到服务器
 	conn, err := net.Dial("tcp", "localhost:8888")
 	if err != nil {
 		log.Fatalf("Failed to connect to server: %v", err)
@@ -42,8 +41,14 @@ func sendMessage(conn net.Conn, clientID, receiverID, content string) error {
 		ReceiverId: receiverID,
 		Content:    content,
 	}
+	msg := &message.Message{
+		Type: message.MessageType_CHAT_MESSAGE, // 显式设置消息类型
+		Payload: &message.Message_ChatMessage{
+			ChatMessage: chatMsg,
+		},
+	}
 
-	body, err := proto.Marshal(chatMsg)
+	body, err := proto.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
@@ -58,10 +63,6 @@ func sendMessage(conn net.Conn, clientID, receiverID, content string) error {
 		},
 		Body: body,
 	}
-
-	// if err := validateFrame(frameRequest); err != nil {
-	// 	return fmt.Errorf("failed to validate frame: %w", err)
-	// }
 
 	return frame.WriteFrame(conn, frameRequest)
 }
@@ -91,8 +92,14 @@ func sendHeartbeatMessage(conn net.Conn, clientID string) error {
 		ClientId:  clientID,
 		Timestamp: time.Now().UnixNano() / int64(time.Millisecond),
 	}
+	msg := &message.Message{
+		Type: message.MessageType_HEARTBEAT, // 显式设置消息类型
+		Payload: &message.Message_Heartbeat{
+			Heartbeat: heartbeat,
+		},
+	}
 
-	body, err := proto.Marshal(heartbeat)
+	body, err := proto.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal heartbeat message: %w", err)
 	}
@@ -107,10 +114,6 @@ func sendHeartbeatMessage(conn net.Conn, clientID string) error {
 		},
 		Body: body,
 	}
-
-	// if err := validateFrame(frameRequest); err != nil {
-	// 	return fmt.Errorf("failed to validate frame: %w", err)
-	// }
 
 	return frame.WriteFrame(conn, frameRequest)
 }
@@ -128,30 +131,43 @@ func receiveResponses(conn net.Conn) {
 			continue
 		}
 
-		var responseMsg message.ChatMessage
-		if err := proto.Unmarshal(responseFrame.Body, &responseMsg); err != nil {
-			log.Printf("Failed to unmarshal response message: %v", err)
+		// 解析外层的 Message
+		var msg message.Message
+		if err := proto.Unmarshal(responseFrame.Body, &msg); err != nil {
+			log.Printf("Failed to unmarshal outer Message: %v", err)
 			continue
 		}
 
-		fmt.Printf("Received response: %+v\n", &responseMsg)
+		// 根据消息类型解析具体的 payload
+		switch msg.Type {
+		case message.MessageType_CHAT_MESSAGE:
+			// 提取 ChatMessage
+			if msg.Payload == nil {
+				log.Printf("ChatMessage payload is nil")
+				return
+			}
+			chatMsg, ok := msg.Payload.(*message.Message_ChatMessage)
+			if !ok {
+				log.Printf("Failed to cast payload to ChatMessage")
+				return
+			}
+			fmt.Printf("Received ChatMessage: %+v\n", chatMsg.ChatMessage)
+
+		case message.MessageType_HEARTBEAT:
+			// 提取 Heartbeat
+			if msg.Payload == nil {
+				log.Printf("Heartbeat payload is nil")
+				return
+			}
+			heartbeat, ok := msg.Payload.(*message.Message_Heartbeat)
+			if !ok {
+				log.Printf("Failed to cast payload to Heartbeat")
+				return
+			}
+			fmt.Printf("Received Heartbeat: %+v\n", heartbeat.Heartbeat)
+
+		default:
+			log.Printf("Unknown message type: %v", msg.Type)
+		}
 	}
 }
-
-// validateFrame 验证 Frame 的头部和消息体是否符合预期
-// func validateFrame(frame *frame.Frame) error {
-// 	if frame.Header.Marker != 0xEF {
-// 		return fmt.Errorf("invalid marker: expected 0xEF, got %x", frame.Header.Marker)
-// 	}
-// 	if frame.Header.Version != 1 {
-// 		return fmt.Errorf("invalid version: expected 1, got %d", frame.Header.Version)
-// 	}
-// 	if frame.Header.MessageFlags != 0x01 && frame.Header.MessageFlags != 0x02 {
-// 		return fmt.Errorf("invalid message flags: expected 0x01 or 0x02, got %x", frame.Header.MessageFlags)
-// 	}
-// 	if frame.Header.MessageSize != uint32(len(frame.Body)) {
-// 		return fmt.Errorf("invalid message size: expected %d, got %d", len(frame.Body), frame.Header.MessageSize)
-// 	}
-
-// 	return nil
-// }
