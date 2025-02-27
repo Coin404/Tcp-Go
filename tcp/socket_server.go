@@ -5,6 +5,7 @@ import (
 	"io"
 	"main/tcp/frame"
 	manager "main/tcp/manager"
+	msg_manager "main/tcp/msg"
 	message "main/tcp/proto"
 	"runtime"
 	"time"
@@ -134,14 +135,14 @@ func worker() {
 			if manager.CheckClientId(payload.ChatMessage.ClientId) {
 				handleChatMessage(payload.ChatMessage)
 			} else {
-				sendAccessForbidden(remoteAddr, "Access Forbidden")
+				msg_manager.SendAccessForbidden(remoteAddr, "Access Forbidden")
 			}
 		case *message.Message_Heartbeat:
 			fmt.Printf("Received Heartbeat: %+v\n", payload.Heartbeat)
 			if manager.CheckClientId(payload.Heartbeat.ClientId) {
 				handleHeartbeat(payload.Heartbeat)
 			} else {
-				sendAccessForbidden(remoteAddr, "Access Forbidden")
+				msg_manager.SendAccessForbidden(remoteAddr, "Access Forbidden")
 			}
 		default:
 			fmt.Println("Unknown message type")
@@ -157,14 +158,14 @@ func handleConnLogin(msg *message.ConnLogin, remoteAddr string) {
 
 	if clientId == "" {
 		fmt.Println("Client ID is empty. Login failed.")
-		sendAccessForbidden(remoteAddr, "ClinetId Empty")
+		msg_manager.SendAccessForbidden(remoteAddr, "ClinetId Empty")
 		return
 	}
 
 	// 登录验证逻辑
 	if accessKey != "coin" || accessSecret != "404" {
 		fmt.Printf("Login validation failed for client: %s\n", clientId)
-		sendAccessForbidden(remoteAddr, "Access Forbidden")
+		msg_manager.SendAccessForbidden(remoteAddr, "Access Forbidden")
 		return
 	}
 
@@ -173,8 +174,8 @@ func handleConnLogin(msg *message.ConnLogin, remoteAddr string) {
 	manager.AddClientIdToAddr(clientId, remoteAddr)
 
 	// 发送login回包
-	response, _ := generateConnAuth(true, "Access Allow")
-	sendResponseByAddr(remoteAddr, response)
+	response, _ := msg_manager.GenerateConnAuth(true, "Access Allow")
+	msg_manager.SendResponseByAddr(remoteAddr, response)
 
 	// 更新客户端的最后活跃时间
 	updateClientLastActive(clientId)
@@ -182,187 +183,21 @@ func handleConnLogin(msg *message.ConnLogin, remoteAddr string) {
 }
 
 func handleChatMessage(msg *message.ChatMessage) {
-	response, _ := generateChatMessage(msg.ClientId, "Go!", "I Get")
-	sendResponse(msg.ClientId, response)
+	response, _ := msg_manager.GenerateChatMessage(msg.ClientId, "Go!", "I Get")
+	msg_manager.SendResponse(msg.ClientId, response)
 }
 
 func handleHeartbeat(msg *message.Heartbeat) {
 	updateClientLastActive(msg.ClientId)
-	response, _ := generateHeartbeatMessage(msg.ClientId)
-	sendResponse(msg.ClientId, response)
-}
-
-// 生成心跳消息
-func generateHeartbeatMessage(clientID string) (*frame.Frame, error) {
-	heartbeat := &message.Heartbeat{
-		ClientId:  clientID,
-		Timestamp: time.Now().UnixNano() / int64(time.Millisecond),
-	}
-
-	msg := &message.Message{
-		Type: message.MessageType_HEARTBEAT,
-		Payload: &message.Message_Heartbeat{
-			Heartbeat: heartbeat,
-		},
-	}
-
-	body, err := proto.Marshal(msg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal heartbeat message: %w", err)
-	}
-
-	frameRequest := &frame.Frame{
-		Header: frame.FrameHeader{
-			Marker:        0xEF,
-			Version:       1,
-			MessageFlags:  0x02,
-			TransactionID: 00002,
-			MessageSize:   uint32(len(body)),
-		},
-		Body: body,
-	}
-
-	return frameRequest, nil
-}
-
-// 生成普通消息
-func generateChatMessage(clientID string, receiverID string, content string) (*frame.Frame, error) {
-	chatMsg := &message.ChatMessage{
-		ClientId:   clientID,
-		ReceiverId: receiverID,
-		Content:    content,
-	}
-	msg := &message.Message{
-		Type: message.MessageType_CHAT_MESSAGE, // 显式设置消息类型
-		Payload: &message.Message_ChatMessage{
-			ChatMessage: chatMsg,
-		},
-	}
-
-	body, err := proto.Marshal(msg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal message: %w", err)
-	}
-
-	frameRequest := &frame.Frame{
-		Header: frame.FrameHeader{
-			Marker:        0xEF,
-			Version:       1,
-			MessageFlags:  0x01,
-			TransactionID: 00001,
-			MessageSize:   uint32(len(body)),
-		},
-		Body: body,
-	}
-
-	return frameRequest, nil
-}
-
-// 生成权限验证消息
-func generateConnAuth(success bool, content string) (*frame.Frame, error) {
-	connAuthMsg := &message.ConnAuth{
-		Success: success,
-		Message: content,
-	}
-	msg := &message.Message{
-		Type: message.MessageType_CONN_AUTH,
-		Payload: &message.Message_ConnAuth{
-			ConnAuth: connAuthMsg,
-		},
-	}
-
-	body, err := proto.Marshal(msg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal connauth message %w", err)
-	}
-
-	frameRequest := &frame.Frame{
-		Header: frame.FrameHeader{
-			Marker:        0xEF,
-			Version:       1,
-			MessageFlags:  0x03,
-			TransactionID: 00003,
-			MessageSize:   uint32(len(body)),
-		},
-		Body: body,
-	}
-
-	return frameRequest, nil
-}
-
-/*
-连接相关
-*/
-// 发送禁止访问消息
-func sendAccessForbidden(remoteAddr string, reason string) {
-	response, _ := generateConnAuth(false, reason)
-	sendResponseByAddr(remoteAddr, response)
-	closeClientConnection(remoteAddr, reason)
-}
-
-// 发送帧消息
-func sendResponse(clientId string, frameResponse *frame.Frame) {
-	// 获取客户端连接
-	conn := getClientConn(clientId)
-	if conn == nil {
-		fmt.Printf("Client %s not found\n", clientId)
-		return
-	}
-
-	// 发送响应帧
-	err := frame.WriteFrame(conn, frameResponse)
-	if err != nil {
-		fmt.Println("Failed to write response frame:", err)
-	}
-}
-
-// 发送帧消息 - addr
-func sendResponseByAddr(remoteAddr string, frameResponse *frame.Frame) {
-	// 获取客户端连接
-	conn := getClientConnByAddr(remoteAddr)
-	if conn == nil {
-		fmt.Printf("remoteAddr %s not found\n", remoteAddr)
-		return
-	}
-	fmt.Printf("remoteAddr %s \n", remoteAddr)
-
-	// 发送响应帧
-	err := frame.WriteFrame(conn, frameResponse)
-	if err != nil {
-		fmt.Println("Failed to write response frame:", err)
-	} else {
-		fmt.Printf("Success response frame to remoteAddr %s \n", remoteAddr)
-	}
-
-}
-
-// 逻辑id获取conn连接
-func getClientConn(clientId string) net.Conn {
-	remoteAddr := manager.GetClientAddr(clientId)
-
-	client, ok := manager.GetClient(remoteAddr)
-	if ok {
-		return *client.Conn
-	}
-	return nil
-}
-
-// id地址获取conn连接
-func getClientConnByAddr(remoteAddr string) net.Conn {
-	client, ok := manager.GetClient(remoteAddr)
-	if ok {
-		return *client.Conn
-	}
-	return nil
+	response, _ := msg_manager.GenerateHeartbeatMessage(msg.ClientId)
+	msg_manager.SendResponse(msg.ClientId, response)
 }
 
 /*
 客户端维护
 */
-
 // 清除客户端信息
 func closeClientConnection(remoteAddr string, reason string) {
-	// 检查客户端是否存在
 	manager.RemoveClient(remoteAddr)
 	manager.RemoveClientIdBy(remoteAddr)
 	fmt.Printf("Client %s disconnected: %s\n", remoteAddr, reason)
