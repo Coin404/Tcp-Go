@@ -21,10 +21,14 @@ type Client struct {
 }
 
 var (
-	clients          = make(map[string]*Client)      // 使用IP+端口，连接指针作为值
-	clientNameToAddr = make(map[string]string)       // 从逻辑ID到IP+端口的映射
-	mu               sync.Mutex                      // 互斥锁，用于线程安全
-	jobChan          = make(chan *frame.Frame, 1000) // 任务队列，用于处理消息
+	clients        = make(map[string]*Client) // 使用IP+端口，连接指针作为值
+	clientIdToAddr = make(map[string]string)  // 从逻辑ID到IP+端口的映射
+	muClient       sync.Mutex                 // 互斥锁，用于线程安全
+	muAddr         sync.Mutex                 // 互斥锁，用于线程安全
+	jobChan        = make(chan struct {
+		Frame      *frame.Frame
+		RemoteAddr string
+	}, 1000) // 任务队列，用于处理消息
 )
 
 func main() {
@@ -62,39 +66,42 @@ func handleClient(conn net.Conn) {
 
 	// 获取客户端的IP+端口作为唯一凭证
 	remoteAddr := conn.RemoteAddr().String()
-	mu.Lock()
+	muClient.Lock()
 	clients[remoteAddr] = &Client{
 		Conn:       &conn,
 		LastActive: time.Now(),
 	}
-	mu.Unlock()
+	muClient.Unlock()
 	fmt.Printf("Client %s connected\n", remoteAddr)
 
 	for {
-		frame, err := frame.ReadFrame(conn)
+		// 检查连接是否已关闭，连接关闭的话结束循环
+		muClient.Lock()
+		_, ok := clients[remoteAddr]
+		muClient.Unlock()
+
+		if !ok {
+			fmt.Printf("Connection %s is closed or not found.\n", remoteAddr)
+			return
+		}
+
+		frameMsg, err := frame.ReadFrame(conn)
 		if err != nil {
 			if err == io.EOF {
 				fmt.Println("Client disconnected gracefully.")
 			} else {
 				fmt.Printf("Failed to read frame: %v\n", err)
 			}
-			logoutClient(remoteAddr)
+			closeClientConnection(remoteAddr, "Client disconnected")
 			return
-		}
-
-		// TODO，需要定义一个登录接口，记录逻辑id，与remoteAddr绑定
-		// 没有绑定的视为野连接，直接释放
-		clientName := determineClientId(frame.Body)
-		if clientName != "" {
-			mu.Lock()
-			clientNameToAddr[clientName] = remoteAddr
-			mu.Unlock()
-			fmt.Printf("Client %s registered with name: %s\n", remoteAddr, clientName)
 		}
 
 		// frame放入消息队列，防止阻塞
 		select {
-		case jobChan <- frame:
+		case jobChan <- struct {
+			Frame      *frame.Frame
+			RemoteAddr string
+		}{frameMsg, remoteAddr}:
 			fmt.Println("jobChan <- frame success", remoteAddr)
 		case <-time.After(100 * time.Millisecond):
 			fmt.Println("Failed to enqueue frame:timeout")
@@ -117,14 +124,16 @@ func startWorkerPool() {
 	// 启动一半的CPU核心数作为工作协程
 	numWorkers := singleCoreLimit * numCPUs / 2
 	fmt.Printf("Starting %d worker goroutines...\n", numWorkers)
-	for i := 0; i < numWorkers; i++ {
+	for range numWorkers {
 		go worker()
 	}
 }
 
 // 消息处理器
 func worker() {
-	for frame := range jobChan {
+	for job := range jobChan {
+		frame := job.Frame
+		remoteAddr := job.RemoteAddr
 		// 解析通用 Message 结构
 		var msg message.Message
 		if err := proto.Unmarshal(frame.Body, &msg); err != nil {
@@ -134,16 +143,61 @@ func worker() {
 
 		// 直接进行类型断言
 		switch payload := msg.Payload.(type) {
+		case *message.Message_ConnLogin:
+			fmt.Printf("Received ConnLogin: %+v\n", payload.ConnLogin)
+			handleConnLogin(payload.ConnLogin, remoteAddr)
 		case *message.Message_ChatMessage:
 			fmt.Printf("Received ChatMessage: %+v\n", payload.ChatMessage)
-			handleChatMessage(payload.ChatMessage)
+			if checkClientId(payload.ChatMessage.ClientId) {
+				handleChatMessage(payload.ChatMessage)
+			} else {
+				sendAccessForbidden(remoteAddr, "Access Forbidden")
+			}
 		case *message.Message_Heartbeat:
 			fmt.Printf("Received Heartbeat: %+v\n", payload.Heartbeat)
-			handleHeartbeat(payload.Heartbeat)
+			if checkClientId(payload.Heartbeat.ClientId) {
+				handleHeartbeat(payload.Heartbeat)
+			} else {
+				sendAccessForbidden(remoteAddr, "Access Forbidden")
+			}
 		default:
 			fmt.Println("Unknown message type")
 		}
 	}
+}
+
+func handleConnLogin(msg *message.ConnLogin, remoteAddr string) {
+	// 从login中解析处 clientNmae，存储到clientIdToAddr ,视为有效连接
+	clientId := msg.ClientId
+	accessKey := msg.AccessKey
+	accessSecret := msg.AccessSecret
+
+	if clientId == "" {
+		fmt.Println("Client ID is empty. Login failed.")
+		sendAccessForbidden(remoteAddr, "ClinetId Empty")
+		return
+	}
+
+	// 登录验证逻辑
+	if accessKey != "coin" || accessSecret != "404" {
+		fmt.Printf("Login validation failed for client: %s\n", clientId)
+		sendAccessForbidden(remoteAddr, "Access Forbidden")
+		return
+	}
+
+	fmt.Printf("Login Success: %s\n", clientId)
+	// 验证通过，存储到 clientIdToAddr
+	muAddr.Lock()
+	clientIdToAddr[clientId] = remoteAddr
+	muAddr.Unlock()
+
+	// 发送login回包
+	response, _ := generateConnAuth(true, "Access Allow")
+	sendResponseByAddr(remoteAddr, response)
+
+	// 更新客户端的最后活跃时间
+	updateClientLastActive(clientId)
+
 }
 
 func handleChatMessage(msg *message.ChatMessage) {
@@ -223,9 +277,48 @@ func generateChatMessage(clientID string, receiverID string, content string) (*f
 	return frameRequest, nil
 }
 
+// 生成权限验证消息
+func generateConnAuth(success bool, content string) (*frame.Frame, error) {
+	connAuthMsg := &message.ConnAuth{
+		Success: success,
+		Message: content,
+	}
+	msg := &message.Message{
+		Type: message.MessageType_CONN_AUTH,
+		Payload: &message.Message_ConnAuth{
+			ConnAuth: connAuthMsg,
+		},
+	}
+
+	body, err := proto.Marshal(msg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal connauth message %w", err)
+	}
+
+	frameRequest := &frame.Frame{
+		Header: frame.FrameHeader{
+			Marker:        0xEF,
+			Version:       1,
+			MessageFlags:  0x03,
+			TransactionID: 00003,
+			MessageSize:   uint32(len(body)),
+		},
+		Body: body,
+	}
+
+	return frameRequest, nil
+}
+
 /*
 连接相关
 */
+// 发送禁止访问消息
+func sendAccessForbidden(remoteAddr string, reason string) {
+	response, _ := generateConnAuth(false, reason)
+	sendResponseByAddr(remoteAddr, response)
+	closeClientConnection(remoteAddr, reason)
+}
+
 // 发送帧消息
 func sendResponse(clientId string, frameResponse *frame.Frame) {
 	// 获取客户端连接
@@ -242,11 +335,44 @@ func sendResponse(clientId string, frameResponse *frame.Frame) {
 	}
 }
 
+// 发送帧消息 - addr
+func sendResponseByAddr(remoteAddr string, frameResponse *frame.Frame) {
+	// 获取客户端连接
+	conn := getClientConnByAddr(remoteAddr)
+	if conn == nil {
+		fmt.Printf("remoteAddr %s not found\n", remoteAddr)
+		return
+	}
+	fmt.Printf("remoteAddr %s \n", remoteAddr)
+
+	// 发送响应帧
+	err := frame.WriteFrame(conn, frameResponse)
+	if err != nil {
+		fmt.Println("Failed to write response frame:", err)
+	} else {
+		fmt.Printf("Success response frame to remoteAddr %s \n", remoteAddr)
+	}
+
+}
+
 // 逻辑id获取conn连接
 func getClientConn(clientId string) net.Conn {
-	mu.Lock()
-	defer mu.Unlock()
-	remoteAddr := clientNameToAddr[clientId]
+	muAddr.Lock()
+	remoteAddr := clientIdToAddr[clientId]
+	muAddr.Unlock()
+
+	muClient.Lock()
+	defer muClient.Unlock()
+	if client, ok := clients[remoteAddr]; ok {
+		return *client.Conn
+	}
+	return nil
+}
+
+// id地址获取conn连接
+func getClientConnByAddr(remoteAddr string) net.Conn {
+	muClient.Lock()
+	defer muClient.Unlock()
 	if client, ok := clients[remoteAddr]; ok {
 		return *client.Conn
 	}
@@ -257,50 +383,43 @@ func getClientConn(clientId string) net.Conn {
 客户端维护
 */
 
-// TODO 解析首次连接，后续重新定义首次连接的消息
-func determineClientId(data []byte) string {
-	var msg message.Message
-	if err := proto.Unmarshal(data, &msg); err != nil {
-		fmt.Printf("Failed to unmarshal Message: %v\n", err)
-	}
-	if message.MessageType_CHAT_MESSAGE == msg.Type {
-		if msg.Payload == nil {
-			fmt.Println("ChatMessage payload is nil")
-			return ""
-		}
-		chatMsg, ok := msg.Payload.(*message.Message_ChatMessage)
-		if !ok {
-			fmt.Println("Failed to cast payload to ChatMessage")
-			return ""
-		}
-		return chatMsg.ChatMessage.ClientId
-	} else {
-		return ""
-	}
-}
-
 // 清除客户端信息
-func logoutClient(remoteAddr string) {
-	mu.Lock()
-	delete(clients, remoteAddr)
-	for name, addr := range clientNameToAddr {
-		if addr == remoteAddr {
-			delete(clientNameToAddr, name)
-			break
+func closeClientConnection(remoteAddr string, reason string) {
+	muClient.Lock()
+	defer muClient.Unlock()
+
+	// 检查客户端是否存在
+	if client, ok := clients[remoteAddr]; ok {
+		// 关闭连接
+		(*client.Conn).Close()
+		delete(clients, remoteAddr)
+
+		muAddr.Lock()
+		for clientId, addr := range clientIdToAddr {
+			if addr == remoteAddr {
+				delete(clientIdToAddr, clientId)
+				break
+			}
 		}
+		muAddr.Unlock()
+		fmt.Printf("Client %s disconnected: %s\n", remoteAddr, reason)
+	} else {
+		fmt.Printf("Client %s not found: %s\n", remoteAddr, reason)
 	}
-	mu.Unlock()
 }
 
 // 更新client存活时间
 func updateClientLastActive(clientId string) {
-	mu.Lock()
-	defer mu.Unlock()
-	remoteAddr := clientNameToAddr[clientId]
+	muAddr.Lock()
+	remoteAddr := clientIdToAddr[clientId]
+	muAddr.Unlock()
+
+	muClient.Lock()
 	clients[remoteAddr] = &Client{
 		Conn:       clients[remoteAddr].Conn,
 		LastActive: time.Now(),
 	}
+	muClient.Unlock()
 }
 
 // 清理连接定时器
@@ -318,26 +437,12 @@ func startCleanupTimer(interval time.Duration) {
 	}
 }
 
-// 定时清理
+// TODO 定时清理
 func cleanupInvalidConnections() {
-	mu.Lock()
-	defer mu.Unlock()
+}
 
-	for remoteAddr, client := range clients {
-		// 检查 remoteAddr 是否在 clientNameToAddr 中
-		isValid := false
-		for _, addr := range clientNameToAddr {
-			if addr == remoteAddr {
-				isValid = true
-				break
-			}
-		}
-
-		// 如果 remoteAddr 不在 clientNameToAddr 中，关闭连接并移除
-		if !isValid {
-			fmt.Printf("Invalid connection detected: %s. Closing...\n", remoteAddr)
-			(*client.Conn).Close()
-			delete(clients, remoteAddr)
-		}
-	}
+// 验证clientId 是否在允许名单
+func checkClientId(clientId string) bool {
+	_, exists := clientIdToAddr[clientId]
+	return exists
 }

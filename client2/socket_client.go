@@ -23,15 +23,51 @@ func main() {
 	fmt.Println("Connected to server. Start sending messages!")
 
 	// 发送初始消息
-	if err := sendMessage(conn, "", "Server", "Hello, Server! I am Client1!!!"); err != nil {
-		log.Fatalf("Failed to send initial message: %v", err)
-	}
+	// if err := sendMessage(conn, "", "Server", "Hello, Server! I am Client2!!!"); err != nil {
+	// 	log.Fatalf("Failed to send initial message: %v", err)
+	// }
+
+	sendConnLogin(conn, "Client2", "coin", "404")
 
 	// 启动心跳消息发送协程
-	go sendHeartbeat(conn, "Client1")
+	go sendHeartbeat(conn, "Client2")
 
 	// 持续接收服务器响应
 	receiveResponses(conn)
+}
+
+// 构造并发送一个登录消息
+func sendConnLogin(conn net.Conn, clientId, accessKey, accessSecret string) error {
+	connLoginMsg := &message.ConnLogin{
+		ClientId:     clientId,
+		AccessKey:    accessKey,
+		AccessSecret: accessSecret,
+	}
+	msg := &message.Message{
+		Type: message.MessageType_CONN_LOGIN,
+		Payload: &message.Message_ConnLogin{
+			ConnLogin: connLoginMsg,
+		},
+	}
+
+	body, err := proto.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal message: %w", err)
+	}
+
+	frameRequest := &frame.Frame{
+		Header: frame.FrameHeader{
+			Marker:        0xEF,
+			Version:       1,
+			MessageFlags:  0x01,
+			TransactionID: 00001,
+			MessageSize:   uint32(len(body)),
+		},
+		Body: body,
+	}
+
+	return frame.WriteFrame(conn, frameRequest)
+
 }
 
 // sendMessage 构造并发送一个 ChatMessage 消息
@@ -166,6 +202,18 @@ func receiveResponses(conn net.Conn) {
 			}
 			fmt.Printf("Received Heartbeat: %+v\n", heartbeat.Heartbeat)
 
+		case message.MessageType_CONN_AUTH:
+			// 提取 ConnAuth
+			if msg.Payload == nil {
+				log.Printf("Heartbeat payload is nil")
+				return
+			}
+			connauth, ok := msg.Payload.(*message.Message_ConnAuth)
+			if !ok {
+				log.Printf("Failed to cast payload to Heartbeat")
+				return
+			}
+			fmt.Printf("Received Heartbeat: %+v\n", connauth.ConnAuth)
 		default:
 			log.Printf("Unknown message type: %v", msg.Type)
 		}

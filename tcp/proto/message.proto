@@ -9,6 +9,8 @@ enum MessageType {
   UNKNOWN = 0;
   CHAT_MESSAGE = 1;
   HEARTBEAT = 2;
+  CONN_LOGIN = 3;
+  CONN_AUTH = 4;
 }
 
 // 通用消息结构
@@ -17,6 +19,8 @@ message Message {
   oneof payload {
     ChatMessage chat_message = 2;
     Heartbeat heartbeat = 3;
+    ConnLogin conn_login = 4;
+    ConnAuth conn_auth = 5;
   }
 }
 
@@ -32,4 +36,18 @@ message ChatMessage {
 message Heartbeat {
   string client_id = 1;
   int64 timestamp = 2;
+}
+
+// 登录消息，连接建立
+message ConnLogin {
+  string client_id = 1;
+  int64 timestamp = 2;
+  string access_key = 3;
+  string access_secret = 4;
+}
+
+// 返回消息，登录成功得到 Auth
+message ConnAuth {
+  bool success = 1;
+  string message = 2;
 }
