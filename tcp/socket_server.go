@@ -7,7 +7,6 @@ import (
 	manager "main/tcp/manager"
 	message "main/tcp/proto"
 	"runtime"
-	"sync"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -15,16 +14,8 @@ import (
 	"net"
 )
 
-// 定义一个结构体，用于存储客户端的连接和最后活跃时间
-type Client struct {
-	Conn       *net.Conn
-	LastActive time.Time
-}
-
 var (
-	clients  = make(map[string]*Client) // 使用IP+端口，连接指针作为值
-	muClient sync.Mutex                 // 互斥锁，用于线程安全
-	jobChan  = make(chan struct {
+	jobChan = make(chan struct {
 		Frame      *frame.Frame
 		RemoteAddr string
 	}, 1000) // 任务队列，用于处理消息
@@ -65,19 +56,12 @@ func handleClient(conn net.Conn) {
 
 	// 获取客户端的IP+端口作为唯一凭证
 	remoteAddr := conn.RemoteAddr().String()
-	muClient.Lock()
-	clients[remoteAddr] = &Client{
-		Conn:       &conn,
-		LastActive: time.Now(),
-	}
-	muClient.Unlock()
+	manager.AddClient(remoteAddr, &conn)
 	fmt.Printf("Client %s connected\n", remoteAddr)
 
 	for {
 		// 检查连接是否已关闭，连接关闭的话结束循环
-		muClient.Lock()
-		_, ok := clients[remoteAddr]
-		muClient.Unlock()
+		_, ok := manager.GetClient(remoteAddr)
 
 		if !ok {
 			fmt.Printf("Connection %s is closed or not found.\n", remoteAddr)
@@ -356,9 +340,8 @@ func sendResponseByAddr(remoteAddr string, frameResponse *frame.Frame) {
 func getClientConn(clientId string) net.Conn {
 	remoteAddr := manager.GetClientAddr(clientId)
 
-	muClient.Lock()
-	defer muClient.Unlock()
-	if client, ok := clients[remoteAddr]; ok {
+	client, ok := manager.GetClient(remoteAddr)
+	if ok {
 		return *client.Conn
 	}
 	return nil
@@ -366,9 +349,8 @@ func getClientConn(clientId string) net.Conn {
 
 // id地址获取conn连接
 func getClientConnByAddr(remoteAddr string) net.Conn {
-	muClient.Lock()
-	defer muClient.Unlock()
-	if client, ok := clients[remoteAddr]; ok {
+	client, ok := manager.GetClient(remoteAddr)
+	if ok {
 		return *client.Conn
 	}
 	return nil
@@ -380,32 +362,16 @@ func getClientConnByAddr(remoteAddr string) net.Conn {
 
 // 清除客户端信息
 func closeClientConnection(remoteAddr string, reason string) {
-	muClient.Lock()
-	defer muClient.Unlock()
-
 	// 检查客户端是否存在
-	if client, ok := clients[remoteAddr]; ok {
-		// 关闭连接
-		(*client.Conn).Close()
-		delete(clients, remoteAddr)
-
-		manager.RemoveClientIdBy(remoteAddr)
-		fmt.Printf("Client %s disconnected: %s\n", remoteAddr, reason)
-	} else {
-		fmt.Printf("Client %s not found: %s\n", remoteAddr, reason)
-	}
+	manager.RemoveClient(remoteAddr)
+	manager.RemoveClientIdBy(remoteAddr)
+	fmt.Printf("Client %s disconnected: %s\n", remoteAddr, reason)
 }
 
 // 更新client存活时间
 func updateClientLastActive(clientId string) {
 	remoteAddr := manager.GetClientAddr(clientId)
-
-	muClient.Lock()
-	clients[remoteAddr] = &Client{
-		Conn:       clients[remoteAddr].Conn,
-		LastActive: time.Now(),
-	}
-	muClient.Unlock()
+	manager.UpdateClientLastActive(remoteAddr)
 }
 
 // 清理连接定时器
