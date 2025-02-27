@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"main/tcp/frame"
+	manager "main/tcp/manager"
 	message "main/tcp/proto"
 	"runtime"
 	"sync"
@@ -21,11 +22,9 @@ type Client struct {
 }
 
 var (
-	clients        = make(map[string]*Client) // 使用IP+端口，连接指针作为值
-	clientIdToAddr = make(map[string]string)  // 从逻辑ID到IP+端口的映射
-	muClient       sync.Mutex                 // 互斥锁，用于线程安全
-	muAddr         sync.Mutex                 // 互斥锁，用于线程安全
-	jobChan        = make(chan struct {
+	clients  = make(map[string]*Client) // 使用IP+端口，连接指针作为值
+	muClient sync.Mutex                 // 互斥锁，用于线程安全
+	jobChan  = make(chan struct {
 		Frame      *frame.Frame
 		RemoteAddr string
 	}, 1000) // 任务队列，用于处理消息
@@ -148,14 +147,14 @@ func worker() {
 			handleConnLogin(payload.ConnLogin, remoteAddr)
 		case *message.Message_ChatMessage:
 			fmt.Printf("Received ChatMessage: %+v\n", payload.ChatMessage)
-			if checkClientId(payload.ChatMessage.ClientId) {
+			if manager.CheckClientId(payload.ChatMessage.ClientId) {
 				handleChatMessage(payload.ChatMessage)
 			} else {
 				sendAccessForbidden(remoteAddr, "Access Forbidden")
 			}
 		case *message.Message_Heartbeat:
 			fmt.Printf("Received Heartbeat: %+v\n", payload.Heartbeat)
-			if checkClientId(payload.Heartbeat.ClientId) {
+			if manager.CheckClientId(payload.Heartbeat.ClientId) {
 				handleHeartbeat(payload.Heartbeat)
 			} else {
 				sendAccessForbidden(remoteAddr, "Access Forbidden")
@@ -187,9 +186,7 @@ func handleConnLogin(msg *message.ConnLogin, remoteAddr string) {
 
 	fmt.Printf("Login Success: %s\n", clientId)
 	// 验证通过，存储到 clientIdToAddr
-	muAddr.Lock()
-	clientIdToAddr[clientId] = remoteAddr
-	muAddr.Unlock()
+	manager.AddClientIdToAddr(clientId, remoteAddr)
 
 	// 发送login回包
 	response, _ := generateConnAuth(true, "Access Allow")
@@ -357,9 +354,7 @@ func sendResponseByAddr(remoteAddr string, frameResponse *frame.Frame) {
 
 // 逻辑id获取conn连接
 func getClientConn(clientId string) net.Conn {
-	muAddr.Lock()
-	remoteAddr := clientIdToAddr[clientId]
-	muAddr.Unlock()
+	remoteAddr := manager.GetClientAddr(clientId)
 
 	muClient.Lock()
 	defer muClient.Unlock()
@@ -394,14 +389,7 @@ func closeClientConnection(remoteAddr string, reason string) {
 		(*client.Conn).Close()
 		delete(clients, remoteAddr)
 
-		muAddr.Lock()
-		for clientId, addr := range clientIdToAddr {
-			if addr == remoteAddr {
-				delete(clientIdToAddr, clientId)
-				break
-			}
-		}
-		muAddr.Unlock()
+		manager.RemoveClientIdBy(remoteAddr)
 		fmt.Printf("Client %s disconnected: %s\n", remoteAddr, reason)
 	} else {
 		fmt.Printf("Client %s not found: %s\n", remoteAddr, reason)
@@ -410,9 +398,7 @@ func closeClientConnection(remoteAddr string, reason string) {
 
 // 更新client存活时间
 func updateClientLastActive(clientId string) {
-	muAddr.Lock()
-	remoteAddr := clientIdToAddr[clientId]
-	muAddr.Unlock()
+	remoteAddr := manager.GetClientAddr(clientId)
 
 	muClient.Lock()
 	clients[remoteAddr] = &Client{
@@ -439,10 +425,4 @@ func startCleanupTimer(interval time.Duration) {
 
 // TODO 定时清理
 func cleanupInvalidConnections() {
-}
-
-// 验证clientId 是否在允许名单
-func checkClientId(clientId string) bool {
-	_, exists := clientIdToAddr[clientId]
-	return exists
 }
