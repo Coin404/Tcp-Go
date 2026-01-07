@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -63,6 +64,9 @@ func CleanupInvalidConnections(timeout time.Duration) {
 		if time.Since(client.LastActive) > timeout {
 			(*client.Conn).Close()
 			delete(clients, remoteAddr)
+			// 同时删除对应的clientId映射
+			RemoveClientIdBy(remoteAddr)
+			fmt.Printf("Cleaned up inactive connection: %s\n", remoteAddr)
 		}
 	}
 }
